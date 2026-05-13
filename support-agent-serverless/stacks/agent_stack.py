@@ -38,6 +38,14 @@ class AgentStack(Stack):
             auto_delete_objects=True,
         )
 
+        # Parameter Store para el token de Telegram (encriptado)
+        telegram_token_param = ssm.StringParameter(
+            self,
+            "TelegramBotTokenParameter",
+            parameter_name="/support-agent/telegram/token01",
+            string_value="PLACEHOLDER_TOKEN_UPDATE_MANUALLY",
+            description="Token del bot de Telegram - Actualizar manualmente después del deploy",
+        )
 
         # Lambda para el agente
         self.agent_function = _lambda.Function(
@@ -64,6 +72,7 @@ class AgentStack(Stack):
                 "MCP_AUTH_TOKEN": "mcp-secret-token-2024",
                 "MODEL_ID": "us.amazon.nova-lite-v1:0",
                 "SESSION_BUCKET": self.sessions_bucket.bucket_name,
+                "TELEGRAM_TOKEN_PARAM": telegram_token_param.parameter_name,
             },
         )
 
@@ -81,6 +90,9 @@ class AgentStack(Stack):
         # Permisos para leer/escribir sesiones en S3
         self.sessions_bucket.grant_read_write(self.agent_function)
 
+        # Permisos para leer el token de Telegram
+        telegram_token_param.grant_read(self.agent_function)
+
 
         # Function URL para testing directo
         function_url = self.agent_function.add_function_url(
@@ -90,6 +102,24 @@ class AgentStack(Stack):
                 allowed_methods=[_lambda.HttpMethod.ALL],
                 allowed_headers=["*"],
             ),
+        )
+
+        # API Gateway para el webhook de Telegram
+        self.telegram_api = apigateway.RestApi(
+            self,
+            "TelegramWebhookApi01",
+            rest_api_name="telegram-webhook01",
+            description="Webhook para el bot de Telegram",
+        )
+
+        # Integración Lambda para el webhook (misma Lambda del agente)
+        telegram_integration = apigateway.LambdaIntegration(
+            self.agent_function
+        )
+
+        # Ruta POST /webhook para Telegram
+        self.telegram_api.root.add_resource("webhook").add_method(
+            "POST", telegram_integration
         )
 
         # Outputs
@@ -105,4 +135,11 @@ class AgentStack(Stack):
             "AgentFunctionName",
             value=self.agent_function.function_name,
             description="Nombre de la función Lambda del agente",
+        )
+
+        CfnOutput(
+            self,
+            "TelegramWebhookUrl01",
+            value=f"{self.telegram_api.url}webhook",
+            description="URL del webhook para configurar en Telegram",
         )

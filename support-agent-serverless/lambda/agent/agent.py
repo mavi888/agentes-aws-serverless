@@ -203,7 +203,7 @@ def create_agent(session_id: str = None):
     session_manager = None
     if session_id and SESSION_BUCKET:
         session_manager = S3SessionManager(
-             =session_id,
+            session_id=session_id,
             bucket=SESSION_BUCKET,
         )
 

@@ -16,6 +16,110 @@ from agent import create_agent
 logger = logging.getLogger()
 logger.setLevel("INFO")
 
+# Cliente SSM para leer parámetros
+ssm_client = boto3.client("ssm")
+
+# Configuración
+TELEGRAM_TOKEN_PARAM = os.environ.get("TELEGRAM_TOKEN_PARAM", "")
+
+# Cache del token (se lee una vez por cold start)
+_telegram_token = None
+
+
+def get_telegram_token():
+    """Obtiene el token de Telegram desde Parameter Store."""
+    global _telegram_token
+    
+    if _telegram_token is None and TELEGRAM_TOKEN_PARAM:
+        try:
+            response = ssm_client.get_parameter(
+                Name=TELEGRAM_TOKEN_PARAM,
+                WithDecryption=True
+            )
+            _telegram_token = response["Parameter"]["Value"]
+        except Exception as e:
+            logger.error("Error obteniendo token de Telegram: %s", str(e))
+            # No fallar si no hay token configurado (para uso directo)
+    
+    return _telegram_token
+
+
+def send_telegram_message(chat_id: int, text: str):
+    """Envía un mensaje a Telegram usando la API."""
+    token = get_telegram_token()
+    if not token:
+        logger.error("No hay token de Telegram configurado")
+        return None
+        
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    logger.info("Enviando mensaje a Telegram - URL: %s", url)
+    logger.info("Chat ID: %s, Texto length: %d", chat_id, len(text))
+    
+    data = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+    }
+    
+    req_data = urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request(url, data=req_data, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            result = json.loads(response.read().decode())
+            logger.info("Respuesta de Telegram: %s", result)
+            return result
+    except Exception as e:
+        logger.error("Error enviando mensaje a Telegram: %s", str(e))
+        logger.error("URL que falló: %s", url)
+        logger.error("Data enviada: %s", data)
+        return None
+
+
+def handle_telegram_webhook(body: str):
+    """Maneja webhook de Telegram."""
+    try:
+        update = json.loads(body)
+        
+        # Extraer el mensaje
+        message = update.get("message")
+        if not message:
+            logger.info("Update sin mensaje, ignorando")
+            return {"statusCode": 200}
+        
+        chat_id = message["chat"]["id"]
+        user_message = message.get("text", "")
+        
+        if not user_message:
+            send_telegram_message(chat_id, "Solo puedo procesar mensajes de texto.")
+            return {"statusCode": 200}
+        
+        logger.info("Mensaje de Telegram chat_id %s: %s", chat_id, user_message)
+        
+        # Usar chat_id como session_id para mantener contexto
+        session_id = f"telegram-{chat_id}"
+        
+        # Procesar con el agente
+        try:
+            agent = create_agent(session_id=session_id)
+            agent_response = agent(user_message)
+            
+            # Enviar respuesta a Telegram
+            send_telegram_message(chat_id, str(agent_response))
+            
+        except Exception as e:
+            logger.error("Error procesando con agente: %s", str(e), exc_info=True)
+            send_telegram_message(
+                chat_id, 
+                "Lo siento, hay un problema técnico. Intentá de nuevo en unos minutos."
+            )
+        
+        return {"statusCode": 200}
+        
+    except Exception as e:
+        logger.error("Error procesando webhook de Telegram: %s", str(e), exc_info=True)
+        return {"statusCode": 500}
 
 def handle_direct_request(body: str):
     """Maneja request directo JSON."""
@@ -70,6 +174,7 @@ def handle_direct_request(body: str):
 
 
 def handler(event, context):
+    """Handler unificado: webhook de Telegram o request directo."""
     logger.info("Evento recibido: %s", json.dumps(event, default=str))
 
     # Parsear el body
@@ -78,5 +183,17 @@ def handler(event, context):
         import base64
         body = base64.b64decode(body).decode("utf-8")
 
-    logger.info("Procesando como request directo")
-    return handle_direct_request(body)
+    # Detectar si es webhook de Telegram o request directo
+    # Los webhooks de Telegram tienen estructura específica con "update_id"
+    try:
+        parsed_body = json.loads(body) if body else {}
+        is_telegram_webhook = "update_id" in parsed_body or "message" in parsed_body
+    except:
+        is_telegram_webhook = False
+
+    if is_telegram_webhook:
+        logger.info("Procesando como webhook de Telegram")
+        return handle_telegram_webhook(body)
+    else:
+        logger.info("Procesando como request directo")
+        return handle_direct_request(body)
