@@ -36,8 +36,11 @@ def handle_direct_request(body: str):
             "body": json.dumps({"error": "Campo 'message' requerido"}),
         }
 
+    # Session ID para mantener el estado de la conversación
+    session_id = request.get("session_id")
+
     try:
-        agent = create_agent()
+        agent = create_agent(session_id=session_id)
         result = agent(user_message)
 
         return {

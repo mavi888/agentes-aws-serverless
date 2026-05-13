@@ -44,6 +44,7 @@ if not logger.handlers:  # Evitar duplicar handlers
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "")
 MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "mcp-secret-token-2024")
 MODEL_ID = os.environ.get("MODEL_ID", "us.amazon.nova-lite-v1:0")
+SESSION_BUCKET = os.environ.get("SESSION_BUCKET", "")
 
 SYSTEM_PROMPT = """Sos un agente de soporte técnico de IT amigable y eficiente.
 
@@ -186,7 +187,7 @@ def crear_ticket(
            f"📝 El ticket ha sido registrado en el sistema."
 
 
-def create_agent():
+def create_agent(session_id: str = None):
     """Crea el agente de soporte con conexión al MCP server remoto.
     """
     model = BedrockModel(model_id=MODEL_ID)
@@ -198,11 +199,25 @@ def create_agent():
         )
     )
 
+    # Session manager con S3 (si hay session_id y bucket configurado)
+    session_manager = None
+    if session_id and SESSION_BUCKET:
+        session_manager = S3SessionManager(
+             =session_id,
+            bucket=SESSION_BUCKET,
+        )
+
+
     agent = Agent(
         system_prompt=SYSTEM_PROMPT,
         model=model,
         tools=[mcp_client, crear_ticket],
         plugins=[LoggingPlugin(), RetryPlugin()],
+        session_manager=session_manager,
+        conversation_manager=SummarizingConversationManager(
+            summary_ratio=0.3,
+            preserve_recent_messages=10,
+        ),
     )
 
     return agent

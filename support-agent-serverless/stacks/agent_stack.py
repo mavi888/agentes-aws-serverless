@@ -30,6 +30,15 @@ class AgentStack(Stack):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
+        # Bucket S3 para sesiones del agente
+        self.sessions_bucket = s3.Bucket(
+            self,
+            "Agent01SessionsBucket",
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+        )
+
+
         # Lambda para el agente
         self.agent_function = _lambda.Function(
             self,
@@ -54,6 +63,7 @@ class AgentStack(Stack):
                 "MCP_SERVER_URL": mcp_endpoint,
                 "MCP_AUTH_TOKEN": "mcp-secret-token-2024",
                 "MODEL_ID": "us.amazon.nova-lite-v1:0",
+                "SESSION_BUCKET": self.sessions_bucket.bucket_name,
             },
         )
 
@@ -67,6 +77,10 @@ class AgentStack(Stack):
                 resources=["*"],
             )
         )
+
+        # Permisos para leer/escribir sesiones en S3
+        self.sessions_bucket.grant_read_write(self.agent_function)
+
 
         # Function URL para testing directo
         function_url = self.agent_function.add_function_url(
