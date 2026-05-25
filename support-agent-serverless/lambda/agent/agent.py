@@ -23,6 +23,7 @@ from strands.hooks import (
     BeforeToolCallEvent,
     AfterToolCallEvent,
     BeforeInvocationEvent,
+    AfterModelCallEvent,
 )
 from strands.agent.conversation_manager import SummarizingConversationManager
 from strands.tools.mcp import MCPClient
@@ -45,6 +46,8 @@ MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "")
 MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "mcp-secret-token-2024")
 MODEL_ID = os.environ.get("MODEL_ID", "us.amazon.nova-lite-v1:0")
 SESSION_BUCKET = os.environ.get("SESSION_BUCKET", "")
+GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")
+GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "DRAFT")
 
 SYSTEM_PROMPT = """Sos un agente de soporte técnico de IT amigable y eficiente.
 
@@ -100,6 +103,21 @@ class LoggingPlugin(Plugin):
                 event.tool_use["name"],
                 elapsed,
             )
+    
+    @hook
+    def log_guardrail(self, event: AfterModelCallEvent) -> None:
+        if event.stop_response is None:
+            return
+        # Buscar guardrail trace en el mensaje de respuesta
+        message = event.stop_response.message
+        for block in message.get("content", []):
+            if isinstance(block, dict) and block.get("guardContent"):
+                logger.warning("🛡️ GUARDRAIL INTERVINO: %s", block["guardContent"])
+                print("\n🛡️ [GUARDRAIL] Contenido bloqueado detectado en la respuesta\n")
+        # stop_reason puede ser "guardrail_intervened"
+        if event.stop_response.stop_reason == "guardrail_intervened":
+            logger.warning("🛡️ GUARDRAIL INTERVINO — stop_reason: guardrail_intervened")
+
 
 
 # --- Plugin de reintentos ---
@@ -190,8 +208,15 @@ def crear_ticket(
 def create_agent(session_id: str = None):
     """Crea el agente de soporte con conexión al MCP server remoto.
     """
-    model = BedrockModel(model_id=MODEL_ID)
-
+    model = BedrockModel(
+        model_id=MODEL_ID,
+        guardrail_id=GUARDRAIL_ID if GUARDRAIL_ID else None,
+        guardrail_version=GUARDRAIL_VERSION if GUARDRAIL_ID else None,
+        guardrail_trace="enabled",
+        guardrail_redact_input=True,
+        guardrail_redact_output=True,
+    )
+    
     mcp_client = MCPClient(
         lambda: streamablehttp_client(
             url=MCP_SERVER_URL,

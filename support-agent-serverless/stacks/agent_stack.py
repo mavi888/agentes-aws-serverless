@@ -26,6 +26,8 @@ class AgentStack(Stack):
         scope: Construct,
         construct_id: str,
         mcp_endpoint: str,
+        guardrail_id: str,
+        guardrail_version: str,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -73,6 +75,8 @@ class AgentStack(Stack):
                 "MODEL_ID": "us.amazon.nova-lite-v1:0",
                 "SESSION_BUCKET": self.sessions_bucket.bucket_name,
                 "TELEGRAM_TOKEN_PARAM": telegram_token_param.parameter_name,
+                "GUARDRAIL_ID": guardrail_id,
+                "GUARDRAIL_VERSION": guardrail_version
             },
         )
 
