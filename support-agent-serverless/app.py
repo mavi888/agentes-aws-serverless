@@ -6,6 +6,7 @@ import aws_cdk as cdk
 from stacks.mcp_stack import McpStack
 from stacks.agent_stack import AgentStack
 from stacks.guardrails_stack import GuardrailStack
+from stacks.knowledgebase_stack import KnowledgeBaseStack
 
 
 app = cdk.App()
@@ -16,7 +17,10 @@ mcp_stack = McpStack(app, "MCPStack01")
 # Stack 2: Guardrail stack
 guardrail_stack = GuardrailStack(app, "AgenteSoporteGuardrail01Stack")
 
-# Stack 2: Agente de soporte (consume el MCP server)
+# Stack 3: Knowledge Base Stack
+kb = KnowledgeBaseStack(app, "SupportAgentKnowledgeBaseStack")
+
+# Stack 4: Agente de soporte (consume el MCP server)
 AgentStack(app, "AgentStack01", 
     mcp_endpoint=mcp_stack.mcp_endpoint, 
     guardrail_id=guardrail_stack.guardrail_id,
