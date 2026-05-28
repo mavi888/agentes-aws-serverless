@@ -1,8 +1,7 @@
 """
 Agente de soporte técnico IT.
 
-Usa Strands SDK con Bedrock y se conecta al MCP server remoto
-de base de conocimiento interna (buscar_solucion) via Streamable HTTP.
+Usa Strands SDK con Bedrock y se conecta una base de conocimiento con S3 Vectors
 
 Incluye plugins de logging y reintentos.
 
@@ -26,7 +25,7 @@ from strands.hooks import (
     AfterModelCallEvent,
 )
 from strands.agent.conversation_manager import SummarizingConversationManager
-from strands.tools.mcp import MCPClient
+from strands_tools import retrieve
 from strands.session.s3_session_manager import S3SessionManager
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -42,21 +41,20 @@ if not logger.handlers:  # Evitar duplicar handlers
     logger.addHandler(console_handler)
 
 # Configuración desde variables de entorno
-MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "")
-MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "mcp-secret-token-2024")
 MODEL_ID = os.environ.get("MODEL_ID", "us.amazon.nova-lite-v1:0")
 SESSION_BUCKET = os.environ.get("SESSION_BUCKET", "")
 GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")
 GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "DRAFT")
+KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "")
 
 SYSTEM_PROMPT = """Sos un agente de soporte técnico de IT amigable y eficiente.
 
 Tenés acceso a la base de conocimiento interna para problemas comunes de IT
-(VPN, email, contraseñas, impresoras).
+(VPN, email, contraseñas, impresoras, politicas de viajes).
 
 Tu forma de trabajar:
 1. Escuchá el problema del usuario
-2. Usá la herramienta buscar_solucion para encontrar la respuesta
+2. SIEMPRE Buscá en la base de conocimiento la información relevante y no inventes la respuesta
 3. Explicá la solución paso a paso de forma clara
 4. Si resolviste el problema o no podés ayudar más, creá un ticket de soporte usando crear_ticket
 5. Si no encontrás solución, recomendá escalar al nivel 2
@@ -65,6 +63,7 @@ Reglas:
 - Siempre hablá en español
 - Sé empático y profesional
 - Sé conciso pero completo
+- Citá la fuente cuando uses información de la KB
 - Creá un ticket cuando:
   * El problema está resuelto (para documentar la solución)
   * No podés resolver el problema (para escalarlo)
@@ -117,7 +116,6 @@ class LoggingPlugin(Plugin):
         # stop_reason puede ser "guardrail_intervened"
         if event.stop_response.stop_reason == "guardrail_intervened":
             logger.warning("🛡️ GUARDRAIL INTERVINO — stop_reason: guardrail_intervened")
-
 
 
 # --- Plugin de reintentos ---
@@ -206,7 +204,7 @@ def crear_ticket(
 
 
 def create_agent(session_id: str = None):
-    """Crea el agente de soporte con conexión al MCP server remoto.
+    """Crea el agente de soporte que usa una KB y guardrails.
     """
     model = BedrockModel(
         model_id=MODEL_ID,
@@ -217,13 +215,6 @@ def create_agent(session_id: str = None):
         guardrail_redact_output=True,
     )
     
-    mcp_client = MCPClient(
-        lambda: streamablehttp_client(
-            url=MCP_SERVER_URL,
-            headers={"Authorization": f"Bearer {MCP_AUTH_TOKEN}"},
-        )
-    )
-
     # Session manager con S3 (si hay session_id y bucket configurado)
     session_manager = None
     if session_id and SESSION_BUCKET:
@@ -232,11 +223,12 @@ def create_agent(session_id: str = None):
             bucket=SESSION_BUCKET,
         )
 
+    # La herramienta retrieve de strands_tools usa KNOWLEDGE_BASE_ID del entorno automáticamente — no necesita instanciación
 
     agent = Agent(
         system_prompt=SYSTEM_PROMPT,
         model=model,
-        tools=[mcp_client, crear_ticket],
+        tools=[retrieve, crear_ticket],
         plugins=[LoggingPlugin(), RetryPlugin()],
         session_manager=session_manager,
         conversation_manager=SummarizingConversationManager(

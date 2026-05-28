@@ -2,10 +2,9 @@
 Script para correr el agente de soporte localmente.
 
 Uso:
-    export MCP_SERVER_URL="https://<api-id>.execute-api.us-east-1.amazonaws.com/mcp"
-    export MCP_AUTH_TOKEN="mcp-secret-token-2024"
     export GUARDRAIL_ID="<tu-guardrail-id>"       # opcional, del output del cdk deploy
     export GUARDRAIL_VERSION="1"                   # opcional, default 1
+    export KNOWLEDGE_BASE_ID="<ID del output>"
     python run_local.py
 """
 
@@ -18,6 +17,7 @@ def main():
     print("------------------------------")
     print(f"🛡️  GUARDRAIL_ID:      {os.environ.get('GUARDRAIL_ID', '⚠️  NO SETEADO')}")
     print(f"🛡️  GUARDRAIL_VERSION: {os.environ.get('GUARDRAIL_VERSION', '⚠️  NO SETEADO')}")
+    print(f"🛡️  KNOWLEDGE_BASE_ID: {os.environ.get('KNOWLEDGE_BASE_ID', '⚠️  NO SETEADO')}")
     print("Escribí 'salir' para terminar\n")
 
     agent = create_agent()

@@ -99,10 +99,18 @@ class GuardrailStack(Stack):
                     CfnGuardrail.PiiEntityConfigProperty(
                         type="EMAIL",
                         action="ANONYMIZE",
+                        input_action="ANONYMIZE",  # Anonimizar emails del usuario
+                        output_action="NONE",      # Mostrar emails de contacto de la KB tal cual
+                        input_enabled=True,
+                        output_enabled=True,
                     ),
                     CfnGuardrail.PiiEntityConfigProperty(
                         type="PHONE",
                         action="ANONYMIZE",
+                        input_action="ANONYMIZE",  # Anonimizar teléfonos del usuario
+                        output_action="NONE",      # Mostrar teléfonos de contacto de la KB tal cual
+                        input_enabled=True,
+                        output_enabled=True,
                     ),
                 ]
             ),
@@ -117,6 +125,8 @@ class GuardrailStack(Stack):
         )
 
         # Crear una versión (necesario para usar el guardrail en producción)
+        # Para crear una nueva versión después de cambios, usar la CLI:
+        # aws bedrock create-guardrail-version --guardrail-identifier <id> --region us-east-1
         self.guardrail_version = CfnGuardrailVersion(self, "SupportAgentGuardrailVersion",
             guardrail_identifier=self.guardrail.attr_guardrail_id,
             description="Versión inicial",

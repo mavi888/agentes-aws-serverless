@@ -20,11 +20,12 @@ guardrail_stack = GuardrailStack(app, "AgenteSoporteGuardrail01Stack")
 # Stack 3: Knowledge Base Stack
 kb = KnowledgeBaseStack(app, "SupportAgentKnowledgeBaseStack")
 
-# Stack 4: Agente de soporte (consume el MCP server)
+# Stack 4: Agente de soporte
 AgentStack(app, "AgentStack01", 
-    mcp_endpoint=mcp_stack.mcp_endpoint, 
-    guardrail_id=guardrail_stack.guardrail_id,
-    guardrail_version=guardrail_stack.guardrail_version_number
+    guardrail_id=guardrail_stack.guardrail_id, 
+    guardrail_version="2",
+    kb_id=kb.knowledge_base_id,
+    kb_arn=kb.knowledge_base_arn,
 )
 
 app.synth()

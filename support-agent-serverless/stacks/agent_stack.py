@@ -25,9 +25,10 @@ class AgentStack(Stack):
         self,
         scope: Construct,
         construct_id: str,
-        mcp_endpoint: str,
         guardrail_id: str,
         guardrail_version: str,
+        kb_id: str,
+        kb_arn: str,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -70,13 +71,12 @@ class AgentStack(Stack):
             timeout=Duration.seconds(120),
             memory_size=512,
             environment={
-                "MCP_SERVER_URL": mcp_endpoint,
-                "MCP_AUTH_TOKEN": "mcp-secret-token-2024",
                 "MODEL_ID": "us.amazon.nova-lite-v1:0",
                 "SESSION_BUCKET": self.sessions_bucket.bucket_name,
                 "TELEGRAM_TOKEN_PARAM": telegram_token_param.parameter_name,
                 "GUARDRAIL_ID": guardrail_id,
-                "GUARDRAIL_VERSION": guardrail_version
+                "GUARDRAIL_VERSION": guardrail_version,
+                "KNOWLEDGE_BASE_ID": kb_id
             },
         )
 
@@ -90,6 +90,12 @@ class AgentStack(Stack):
                 resources=["*"],
             )
         )
+
+        # Permisos para la KB — ARN específico
+        self.agent_function.add_to_role_policy(iam.PolicyStatement(
+            actions=["bedrock:Retrieve"],
+            resources=[kb_arn],
+        ))
 
         # Permisos para leer/escribir sesiones en S3
         self.sessions_bucket.grant_read_write(self.agent_function)
