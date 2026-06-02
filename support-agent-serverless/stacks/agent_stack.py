@@ -86,6 +86,7 @@ class AgentStack(Stack):
                 actions=[
                     "bedrock:InvokeModel",
                     "bedrock:InvokeModelWithResponseStream",
+                    "bedrock:ApplyGuardrail"
                 ],
                 resources=["*"],
             )

@@ -27,6 +27,10 @@ class AgentStack(Stack):
         scope: Construct,
         construct_id: str,
         mcp_endpoint: str,
+        guardrail_id: str,
+        guardrail_version: str,
+        kb_id: str,
+        kb_arn: str,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -74,6 +78,9 @@ class AgentStack(Stack):
                 "MODEL_ID": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
                 "SESSION_BUCKET": self.sessions_bucket.bucket_name,
                 "TELEGRAM_TOKEN_PARAM": telegram_token_param.parameter_name,
+                "GUARDRAIL_ID": guardrail_id,
+                "GUARDRAIL_VERSION": guardrail_version,
+                "KNOWLEDGE_BASE_ID": kb_id, 
             },
         )
 
@@ -83,10 +90,17 @@ class AgentStack(Stack):
                 actions=[
                     "bedrock:InvokeModel",
                     "bedrock:InvokeModelWithResponseStream",
+                    "bedrock:ApplyGuardrail"
                 ],
                 resources=["*"],
             )
         )
+
+        # Permisos para la KB — ARN específico
+        self.agent_function.add_to_role_policy(iam.PolicyStatement(
+            actions=["bedrock:Retrieve"],
+            resources=[kb_arn],
+        ))
 
         # Permisos para leer/escribir sesiones en S3
         self.sessions_bucket.grant_read_write(self.agent_function)

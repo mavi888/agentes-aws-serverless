@@ -25,10 +25,12 @@ from strands.hooks import (
     BeforeToolCallEvent,
     AfterToolCallEvent,
     BeforeInvocationEvent,
+    AfterModelCallEvent
 )
 from strands.agent.conversation_manager import SummarizingConversationManager
 from strands.tools.mcp import MCPClient
 from strands_tools import calculator
+from strands_tools import retrieve
 
 from strands.session.s3_session_manager import S3SessionManager
 from mcp.client.streamable_http import streamablehttp_client
@@ -44,6 +46,10 @@ MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "")
 MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "mcp-secret-token-2026")
 MODEL_ID = os.environ.get("MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 SESSION_BUCKET = os.environ.get("SESSION_BUCKET", "")
+GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")
+GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "DRAFT")
+KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "")
+
 
 SYSTEM_PROMPT="""Sos un chef profesional y amigable que ayuda a las personas a cocinar.
 
@@ -52,18 +58,21 @@ Tenés acceso a estas herramientas:
 2. buscar_por_categoria — Para buscar recetas por tipo de cocina o categoría
 3. obtener_receta — Para obtener los detalles completos de una receta
 4. calculator — Para ajustar cantidades de ingredientes
+5. retrieve — Para buscar recetas de la abuela, familiares y tradicionales en la base de conocimiento
 
 Tu forma de trabajar:
 1. Cuando el usuario quiere cocinar, revisá qué tiene en la heladera
 2. Sugerí recetas creativas basándote en los ingredientes disponibles
 3. Cuando el usuario pide inspiración o recetas de una cocina (mexicana, vietnamita, italiana, etc), usá buscar_por_categoria para buscar opciones reales
-4. Cuando eligen una receta, usá obtener_receta para dar los detalles completos
-5. Cuando el usuario menciona ingredientes, agregalos a la heladera
+4. Cuando el usuario menciona "receta de la abuela", "receta familiar", "receta tradicional" o "receta casera", SIEMPRE usá retrieve primero antes de responder
+5. Cuando eligen una receta, usá obtener_receta para dar los detalles completos
+6. Cuando el usuario menciona ingredientes, agregalos a la heladera
 
 Reglas:
 - Siempre hablá en español
 - Sé práctico y directo
 - Sé creativo pero realista con las combinaciones de ingredientes
+- NUNCA digas que no tenés acceso a recetas sin haber intentado usar retrieve primero
 """
 
 
@@ -100,6 +109,28 @@ class LoggingPlugin(Plugin):
                 event.tool_use["name"],
                 elapsed,
             )
+    
+    @hook
+    def log_guardrail(self, event: AfterModelCallEvent) -> None:
+        if event.stop_response is None:
+            return
+
+        stop_reason = getattr(event.stop_response, "stop_reason", None)
+
+        # stop_reason == "guardrail_intervened" es la señal principal
+        if stop_reason == "guardrail_intervened":
+            logger.warning("🛡️ GUARDRAIL INTERVINO — stop_reason: guardrail_intervened")
+            print("\n🛡️ [GUARDRAIL] Intervino el guardrail (stop_reason=guardrail_intervened)\n")
+
+        # Buscar guardrail trace en los bloques de contenido
+        message = getattr(event.stop_response, "message", None)
+        if message:
+            content = message.get("content", []) if isinstance(message, dict) else getattr(message, "content", [])
+            for block in content:
+                if isinstance(block, dict) and block.get("guardContent"):
+                    logger.warning("🛡️ GUARDRAIL — guardContent: %s", block["guardContent"])
+                    print(f"\n🛡️ [GUARDRAIL] guardContent detectado: {block['guardContent']}\n")
+
 
 
 # --- Plugin de reintentos ---
@@ -136,10 +167,22 @@ def create_agent(session_id: str = None):
         session_id: ID de sesión para persistir la conversación en S3.
                     Si es None, el agente funciona stateless.
     """
-    model = BedrockModel(model_id=MODEL_ID)
+    model = BedrockModel(
+        model_id=MODEL_ID,
+        guardrail_id=GUARDRAIL_ID if GUARDRAIL_ID else None,
+        guardrail_version=GUARDRAIL_VERSION if GUARDRAIL_ID else None,
+        guardrail_trace="enabled",
+        guardrail_redact_input=False,
+        guardrail_redact_output=False,
+        # Evalúa solo el último mensaje del usuario, no todo el historial.
+        # Esto evita que el contexto previo "diluya" la detección del topic.
+        guardrail_latest_message=True,
+    )
+
+    # La herramienta retrieve de strands_tools usa KNOWLEDGE_BASE_ID del entorno automáticamente — no necesita instanciación
 
     # Armar lista de tools
-    tools: list = [calculator]
+    tools: list = [calculator, retrieve]
 
     # MCP client solo si hay URL configurada
     if MCP_SERVER_URL:
