@@ -1,0 +1,6 @@
+strands-agents
+strands-agents-tools
+mcp
+pydantic
+boto3
+botocore[crt]
