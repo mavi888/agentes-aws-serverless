@@ -3,11 +3,11 @@ import os
 
 import aws_cdk as cdk
 
-import AgentCoreStack from agentcore_stack
+from stacks.agentcore_stack import AgentCoreStack
 
 
 app = cdk.App()
 
-AgentCoreStack=AgentCoreStack(app, "TravelAssitant-AgentCoreStack")    
+agent_stack = AgentCoreStack(app, "TravelAssitant-AgentCoreStack")
 
 app.synth()

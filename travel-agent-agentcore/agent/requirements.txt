@@ -1,5 +1,6 @@
 strands-agents
 strands-agents-tools
+bedrock-agentcore
 mcp
 pydantic
 boto3
