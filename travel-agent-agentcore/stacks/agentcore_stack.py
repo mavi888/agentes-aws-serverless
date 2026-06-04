@@ -1,8 +1,14 @@
 from aws_cdk import (
     Stack,
     CfnOutput,
+    aws_iam as iam,
 )
-from aws_cdk.aws_bedrockagentcore import CfnMemory
+from aws_cdk.aws_bedrockagentcore import (
+    CfnGateway,
+    CfnGatewayTarget,
+    CfnMemory
+)
+
 from constructs import Construct
 
 
@@ -19,7 +25,13 @@ class AgentCoreStack(Stack):
                         Persiste entre sesiones y se actualiza automáticamente.
     """
 
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(
+        self, 
+        scope: Construct, 
+        construct_id: str, 
+        lambda_arn: str,
+        **kwargs,
+    ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         # ── AgentCore Memory con estrategias Semantic + User Preference ────────
@@ -63,6 +75,80 @@ class AgentCoreStack(Stack):
             ],
         )
 
+        # ── IAM Role para el Gateway ───────────────────────────────────────────
+        gateway_role = iam.Role(
+            self, "TravelAgentGatewayRole",
+            role_name="TravelAgentGatewayRole",
+            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+            description="Role del Gateway para invocar la Lambda get_trip_summary",
+        )
+
+        # Permiso para invocar la Lambda get_trip_summary
+        gateway_role.add_to_policy(iam.PolicyStatement(
+            actions=["lambda:InvokeFunction"],
+            resources=[lambda_arn],
+        ))
+
+        # ── AgentCore Gateway ──────────────────────────────────────────────────
+        # authorizer_type "AWS_IAM" → el agente se autentica con SigV4.
+        # El agente usa streamablehttp_client_with_sigv4 para firmar cada request.
+        gateway = CfnGateway(
+            self, "TravelAgentGateway",
+            name="TravelAgentGateway",
+            description="Gateway del Travel Agent — Target Lambda",
+            authorizer_type="AWS_IAM",
+            protocol_type="MCP",
+            role_arn=gateway_role.role_arn,
+        )
+
+        # ── Target: Lambda get_trip_summary (sin Identity, solo IAM) ─────────
+        lambda_target = CfnGatewayTarget(
+            self, "TripSummaryLambdaTarget",
+            name="TripSummaryTarget",
+            description="Resumen de viaje del usuario — datos mock (en producción: base de datos)",
+            gateway_identifier=gateway.ref,
+            # Lambda targets requieren especificar el tipo de credencial explícitamente.
+            # GATEWAY_IAM_ROLE indica que el Gateway usa su propio role IAM para invocar la Lambda.
+            credential_provider_configurations=[
+                CfnGatewayTarget.CredentialProviderConfigurationProperty(
+                    credential_provider_type="GATEWAY_IAM_ROLE",
+                )
+            ],
+            target_configuration=CfnGatewayTarget.TargetConfigurationProperty(
+                mcp=CfnGatewayTarget.McpTargetConfigurationProperty(
+                    lambda_=CfnGatewayTarget.McpLambdaTargetConfigurationProperty(
+                        lambda_arn=lambda_arn,
+                        tool_schema=CfnGatewayTarget.ToolSchemaProperty(
+                            inline_payload=[
+                                CfnGatewayTarget.ToolDefinitionProperty(
+                                    name="get_trip_summary",
+                                    description=(
+                                        "Retorna el resumen de viaje del usuario: "
+                                        "vuelos reservados, hotel y costo total. "
+                                        "En producción consulta la base de datos del usuario."
+                                    ),
+                                    input_schema=CfnGatewayTarget.SchemaDefinitionProperty(
+                                        type="object",
+                                        properties={
+                                            "destination": CfnGatewayTarget.SchemaDefinitionProperty(
+                                                type="string",
+                                                description="Destino del viaje (ej: 'Tokyo', 'Paris')",
+                                            ),
+                                            "user_id": CfnGatewayTarget.SchemaDefinitionProperty(
+                                                type="string",
+                                                description="ID único del usuario",
+                                            ),
+                                        },
+                                        required=["destination", "user_id"],
+                                    ),
+                                )
+                            ]
+                        ),
+                    )
+                )
+            ),
+        )
+
         # ── Outputs ────────────────────────────────────────────────────────────
         # Estos valores los necesitás para configurar el agente después del deploy.
         CfnOutput(
@@ -72,5 +158,21 @@ class AgentCoreStack(Stack):
             export_name="TravelAgentMemoryId",
         )
 
+        CfnOutput(
+            self, "TravelAgentGatewayId",
+            value=gateway.ref,
+            description="Gateway ID",
+            export_name="TravelAgentGatewayId",
+        )
+
+        CfnOutput(
+            self, "TravelAgentGatewayUrl",
+            value=gateway.attr_gateway_url,
+            description="Gateway URL — setear como TRAVEL_AGENT_GATEWAY_URL",
+            export_name="TravelAgentGatewayUrl",
+        )
+
         # Exponemos el memory_id como atributo para otros stacks
         self.memory_id = memory.ref
+        self.gateway_id = gateway.ref
+        self.gateway_url = gateway.attr_gateway_url

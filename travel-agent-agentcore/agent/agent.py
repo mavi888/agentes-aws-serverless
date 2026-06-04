@@ -13,12 +13,17 @@ from datetime import datetime
 
 from strands import Agent
 from strands.models import BedrockModel
+from strands.tools.mcp import MCPClient
 from strands.plugins import Plugin, hook
 from strands.hooks import (
     BeforeToolCallEvent,
     AfterToolCallEvent,
     BeforeInvocationEvent,
 )
+
+import boto3
+from streamable_http_sigv4 import make_sigv4_auth
+from mcp.client.streamable_http import streamablehttp_client
 
 # AgentCore Memory
 from bedrock_agentcore.memory import MemoryClient
@@ -46,33 +51,44 @@ USER_PREFERENCE_STRATEGY_ID  = os.environ.get("USER_PREFERENCE_STRATEGY_ID",  ""
 # Se genera una vez por proceso. El ACTOR_ID lo provee el caller (run_local, Lambda, etc.)
 SESSION_ID = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+# Gateway URL — output del AgentCoreStack después del deploy
+GATEWAY_URL = os.environ.get("TRAVEL_AGENT_GATEWAY_URL", "")
+
+
 # ── System Prompt ──────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """Sos un asistente personal de viajes.
-Tu trabajo es ayudar al usuario a planificar viajes y recordar sus preferencias
-a lo largo del tiempo.
+SYSTEM_PROMPT = """Sos un asistente personal de viajes con acceso a herramientas reales.
 
-== USO DE MEMORIA (MUY IMPORTANTE) ==
+== IDENTIDAD DEL USUARIO ==
+Tu user_id es: {actor_id}
+Usá siempre este user_id cuando llames a get_trip_summary.
 
-Al INICIO de cada conversación:
-1. Usá search_memory para buscar preferencias y hechos del usuario.
-   Ejemplo: search_memory("preferencias de vuelo aerolínea asiento")
-2. Usá search_memory para buscar historial de viajes.
-   Ejemplo: search_memory("destinos visitados viajes anteriores")
-3. Con lo que encuentres, personalizá tu saludo.
+== HERRAMIENTAS DISPONIBLES ==
 
-Durante la conversación, cuando el usuario mencione algo relevante:
-- Aerolíneas preferidas o programas de fidelidad → add_memory("Prefiere aerolínea X, programa Y")
-- Preferencia de asiento → add_memory("Prefiere asiento de ventana en vuelos largos")
-- Clase de cabina → add_memory("Viaja en business cuando el vuelo supera 6 horas")
-- Destinos visitados o deseados → add_memory("Visitó Tokio en 2024, quiere ir a Kioto")
-- Preferencias de hotel → add_memory("Prefiere hoteles boutique céntricos, no cadenas")
-- Restricciones dietéticas, movilidad u otras → add_memory("Vegetariana, solicita menú especial")
+1. get_trip_summary(destination, user_id):
+   - Retorna el resumen de un viaje ya reservado: vuelos, hotel y costo total.
+   - Usala cuando el usuario quiera ver detalles de un viaje existente.
+   - Siempre pasá user_id="{actor_id}" — es el identificador del usuario actual.
+   - Los datos son de demo — en producción consultaría la base de datos real.
+
+== (Fase 2 — próximamente) ==
+2. search_flights(origin, destination, date, cabin_class)
+3. book_flight(flight_id, passenger_name, passport_number)
+
+== USO DE MEMORIA ==
+
+Al INICIO de la conversación:
+  - Usá search_memory para recuperar preferencias e historial del usuario.
+
+Durante la conversación, guardá cosas importantes:
+  - Aerolíneas preferidas → add_memory("Prefiere volar con JAL en clase business")
+  - Preferencia de asiento → add_memory("Prefiere asiento de ventana en vuelos largos")
+  - Destinos visitados → add_memory("Visitó Tokyo en agosto 2026")
+  - Presupuesto → add_memory("Presupuesto para Europa: USD 5000")
 
 Reglas:
-- No preguntes por información que ya tenés en memoria.
-- Cuando aprendas algo nuevo, reconocelo de forma natural (sin parecer un formulario).
-- Si no tenés contexto del usuario, hacé 2-3 preguntas clave para conocer sus preferencias.
-- Respondé siempre en el mismo idioma que usa el usuario.
+  - No preguntés info que ya tenés en memoria.
+  - Respondé en el idioma que usa el usuario.
+  - Los datos de demo son ficticios — aclaralo si el usuario pregunta.
 """
 
 
@@ -105,6 +121,10 @@ class LoggingPlugin(Plugin):
 def _memory_configured() -> bool:
     """Retorna True si el Memory ID y los Strategy IDs están configurados."""
     return bool(MEMORY_ID and SEMANTIC_STRATEGY_ID and USER_PREFERENCE_STRATEGY_ID)
+
+
+def _gateway_configured() -> bool:
+    return bool(GATEWAY_URL)
 
 
 def get_existing_memory(memory_client: MemoryClient, actor_id: str) -> str:
@@ -215,6 +235,22 @@ def create_agent(actor_id: str, session_id: str = None):
     else:
         logger.warning(
             "⚠️  TRAVEL_AGENT_MEMORY_ID no configurado — agente sin memoria. "
+            "Completá las variables de entorno tras el cdk deploy."
+        )
+
+    # ── Conectar al Gateway via MCPClient con SigV4 ───────────────────────────
+    # El Gateway usa authorizer_type="AWS_IAM" — requiere SigV4 en cada request.
+    # make_sigv4_auth() crea el objeto auth que streamablehttp_client acepta directo.
+    if _gateway_configured():
+        auth = make_sigv4_auth(region=REGION)
+        gateway_client = MCPClient(
+            lambda: streamablehttp_client(GATEWAY_URL, auth=auth)
+        )
+        tools.append(gateway_client)
+        logger.info("✅ Gateway conectado (SigV4): %s", GATEWAY_URL)
+    else:
+        logger.warning(
+            "⚠️  TRAVEL_AGENT_GATEWAY_URL no configurado — sin herramientas de Gateway. "
             "Completá las variables de entorno tras el cdk deploy."
         )
 
