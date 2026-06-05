@@ -6,11 +6,14 @@ from aws_cdk import (
 from aws_cdk.aws_bedrockagentcore import (
     CfnGateway,
     CfnGatewayTarget,
-    CfnMemory
+    CfnMemory,
+    CfnApiKeyCredentialProvider
 )
 
 from constructs import Construct
 
+# API key del demo — mismo valor que tiene el Authorizer Lambda del MCP server
+AIRLINE_API_KEY = "airline-demo-key-2026"
 
 class AgentCoreStack(Stack):
     """
@@ -30,6 +33,7 @@ class AgentCoreStack(Stack):
         scope: Construct, 
         construct_id: str, 
         lambda_arn: str,
+        mcp_endpoint: str,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -89,6 +93,44 @@ class AgentCoreStack(Stack):
             resources=[lambda_arn],
         ))
 
+         # Permisos para que el Gateway gestione las credenciales del Credential Provider:
+        # - GetWorkloadAccessToken: obtiene el token de identidad interno del Gateway
+        # - GetResourceApiKey: recupera el API key del Credential Provider
+        # - secretsmanager:GetSecretValue: lee el secret interno que crea CfnApiKeyCredentialProvider
+        #   (AgentCore guarda la key en un secret propio con prefijo bedrock-agentcore-identity)
+        gateway_role.add_to_policy(iam.PolicyStatement(
+            actions=[
+                "bedrock-agentcore:GetWorkloadAccessToken",
+                "bedrock-agentcore:GetResourceApiKey",
+            ],
+            resources=["*"],
+        ))
+
+        gateway_role.add_to_policy(iam.PolicyStatement(
+            actions=["secretsmanager:GetSecretValue"],
+            resources=["arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity*"],
+        ))
+
+        # ── API Key Credential Provider ────────────────────────────────────────
+        # El Gateway usa este provider para inyectar el API key en cada request
+        # al MCP server de aerolínea. El agente nunca ve la key.
+        #
+        # Demo: la key está hardcodeada en el template CDK (visible en CloudFormation).
+        #
+        # Producción: reemplazar api_key= por add_override para pasar api_key_secret_arn.
+        # El schema de CloudFormation lo soporta pero el construct Python todavía no
+        # lo expone. Con add_override la key vive en Secrets Manager y nadie la ve:
+        #
+        #   api_key_provider.add_override(
+        #       "Properties.ApiKeySecretArn",
+        #       "arn:aws:secretsmanager:us-east-1:123456789012:secret:airline-key"
+        #   )
+        api_key_provider = CfnApiKeyCredentialProvider(
+            self, "AirlineApiKeyProvider",
+            name="TravelAgentAirlineApiKey",
+            api_key=AIRLINE_API_KEY,
+        )
+
         # ── AgentCore Gateway ──────────────────────────────────────────────────
         # authorizer_type "AWS_IAM" → el agente se autentica con SigV4.
         # El agente usa streamablehttp_client_with_sigv4 para firmar cada request.
@@ -101,7 +143,7 @@ class AgentCoreStack(Stack):
             role_arn=gateway_role.role_arn,
         )
 
-        # ── Target: Lambda get_trip_summary (sin Identity, solo IAM) ─────────
+        # ── Target1: Lambda get_trip_summary (sin Identity, solo IAM) ─────────
         lambda_target = CfnGatewayTarget(
             self, "TripSummaryLambdaTarget",
             name="TripSummaryTarget",
@@ -144,6 +186,35 @@ class AgentCoreStack(Stack):
                                 )
                             ]
                         ),
+                    )
+                )
+            ),
+        )
+
+        # ── Target 2: MCP server de aerolínea ─────────────────────────────────
+        # El Gateway inyecta el API key en el header Authorization antes de
+        # reenviar cada request al MCP server. El agente no necesita saber la key.
+        CfnGatewayTarget(
+            self, "AirlineMcpTarget",
+            name="AirlineSearch1Target",
+            description="MCP server de aerolínea — search_flights + book_flight v2",
+            gateway_identifier=gateway.ref,
+            credential_provider_configurations=[
+                CfnGatewayTarget.CredentialProviderConfigurationProperty(
+                    credential_provider_type="API_KEY",
+                    credential_provider=CfnGatewayTarget.CredentialProviderProperty(
+                        api_key_credential_provider=CfnGatewayTarget.ApiKeyCredentialProviderProperty(
+                            provider_arn=api_key_provider.attr_credential_provider_arn,
+                            credential_location="HEADER",
+                            credential_parameter_name="Authorization",
+                        )
+                    ),
+                )
+            ],
+            target_configuration=CfnGatewayTarget.TargetConfigurationProperty(
+                mcp=CfnGatewayTarget.McpTargetConfigurationProperty(
+                    mcp_server=CfnGatewayTarget.McpServerTargetConfigurationProperty(
+                        endpoint=mcp_endpoint,
                     )
                 )
             ),

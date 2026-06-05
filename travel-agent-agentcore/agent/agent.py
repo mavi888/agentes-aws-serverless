@@ -70,9 +70,17 @@ Usá siempre este user_id cuando llames a get_trip_summary.
    - Siempre pasá user_id="{actor_id}" — es el identificador del usuario actual.
    - Los datos son de demo — en producción consultaría la base de datos real.
 
-== (Fase 2 — próximamente) ==
-2. search_flights(origin, destination, date, cabin_class)
-3. book_flight(flight_id, passenger_name, passport_number)
+
+2. search_flights(origin, destination, date, cabin_class):
+   - Busca vuelos disponibles entre dos ciudades en una fecha dada.
+   - origin y destination van en código IATA (JFK, NRT, CDG, EZE, etc.)
+   - date en formato YYYY-MM-DD
+   - cabin_class es opcional: Economy, Business, First
+
+3. book_flight(flight_id, passenger_name, passport_number):
+   - Reserva un vuelo usando el flight_id obtenido de search_flights.
+   - Pedile al usuario nombre completo y número de pasaporte antes de reservar.
+   - Confirmá siempre el precio antes de proceder.
 
 == USO DE MEMORIA ==
 
