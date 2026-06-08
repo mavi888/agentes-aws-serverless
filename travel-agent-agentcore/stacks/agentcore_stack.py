@@ -284,6 +284,17 @@ class AgentCoreStack(Stack):
             resources=["*"],
         ))
 
+        # X-Ray — requerido para observability / traces
+        runtime_role.add_to_policy(iam.PolicyStatement(
+            actions=[
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+                "xray:GetSamplingRules",
+                "xray:GetSamplingTargets",
+            ],
+            resources=["*"],
+        ))
+
         # S3: leer el asset de código subido por CDK
         runtime_role.add_to_policy(iam.PolicyStatement(
             actions=["s3:GetObject", "s3:ListBucket"],
@@ -297,7 +308,7 @@ class AgentCoreStack(Stack):
         # El Runtime rechaza __pycache__ compilados para otra arquitectura,
         # así que los eliminamos del output.
         agent_artifact = AgentRuntimeArtifact.from_code_asset(
-            entrypoint=["main.py"],
+            entrypoint=["opentelemetry-instrument","main.py"],
             path=os.path.join(os.path.dirname(__file__), "..", "agent"),
             runtime=AgentCoreRuntime.PYTHON_3_13,
             bundling=aws_cdk.BundlingOptions(

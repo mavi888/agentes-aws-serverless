@@ -1,8 +1,10 @@
 strands-agents
 strands-agents-tools
+strands-agents[otel]==1.42.0
 bedrock-agentcore
 mcp
 httpx-aws-auth
 pydantic
 boto3
 botocore[crt]
+aws-opentelemetry-distro>=0.10.0
