@@ -1,3 +1,6 @@
+import os
+
+import aws_cdk
 from aws_cdk import (
     Stack,
     CfnOutput,
@@ -7,7 +10,10 @@ from aws_cdk.aws_bedrockagentcore import (
     CfnGateway,
     CfnGatewayTarget,
     CfnMemory,
-    CfnApiKeyCredentialProvider
+    CfnApiKeyCredentialProvider,
+    Runtime,
+    AgentRuntimeArtifact,
+    AgentCoreRuntime,
 )
 
 from constructs import Construct
@@ -17,15 +23,19 @@ AIRLINE_API_KEY = "airline-demo-key-2026"
 
 class AgentCoreStack(Stack):
     """
-    CDK Stack que provisiona AgentCore Memory para el Travel Agent.
+    Stack de AgentCore: Memory + Gateway + Runtime.
 
-    Estrategias de memoria:
-    - SEMANTIC:         Memoria a largo plazo con búsqueda vectorial (RAG).
-                        Persiste entre sesiones. Ideal para destinos visitados,
-                        preferencias de viaje, historial de reservas.
-    - USER_PREFERENCE:  Almacena preferencias explícitas del usuario
-                        (asiento de ventana, aerolínea favorita, clase de vuelo, etc.)
-                        Persiste entre sesiones y se actualiza automáticamente.
+    Target 1 (Lambda):
+      - get_trip_summary
+      - El Gateway la invoca con su IAM role (GATEWAY_IAM_ROLE)
+
+    Target 2 (MCP server de aerolínea):
+      - search_flights + book_flight
+      - El Gateway inyecta el API key en el header Authorization (API_KEY)
+      - El agente nunca ve la key
+
+    Runtime:
+      - Hostea el Travel Agent (agent/main.py) como CodeZip en S3
     """
 
     def __init__(
@@ -220,6 +230,106 @@ class AgentCoreStack(Stack):
             ),
         )
 
+        # ── IAM Role para el Runtime ───────────────────────────────────────────
+        runtime_role = iam.Role(
+            self, "TravelAgentRuntimeRole",
+            role_name="TravelAgentRuntimeRole",
+            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+            description="Rol del AgentCore Runtime para el Travel Agent",
+        )
+
+        # Bedrock: invocar modelos (Nova Lite con cross-region inference prefix)
+        runtime_role.add_to_policy(iam.PolicyStatement(
+            actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+            resources=[
+                f"arn:aws:bedrock:*::foundation-model/*",
+                f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
+            ],
+        ))
+
+        # AgentCore Gateway: invocar el Gateway del Travel Agent (SigV4)
+        runtime_role.add_to_policy(iam.PolicyStatement(
+            actions=["bedrock-agentcore:InvokeGateway"],
+            resources=["*"],
+        ))
+
+        # AgentCore Memory: leer y escribir memorias del usuario
+        runtime_role.add_to_policy(iam.PolicyStatement(
+            actions=[
+                "bedrock-agentcore:CreateEvent",
+                "bedrock-agentcore:GetMemoryRecord",
+                "bedrock-agentcore:ListMemoryRecords",
+                "bedrock-agentcore:RetrieveMemoryRecords",
+                "bedrock-agentcore:PutMemoryRecords",
+                "bedrock-agentcore:DeleteMemoryRecord",
+                "bedrock-agentcore:ListEvents",
+                "bedrock-agentcore:GetEvent",
+                "bedrock-agentcore:DeleteEvent",
+            ],
+            resources=[
+                f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:memory/{memory.attr_memory_id}",
+                f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:memory/{memory.attr_memory_id}/*",
+            ],
+        ))
+
+        # AgentCore Memory control plane: resolver Strategy IDs al arrancar
+        runtime_role.add_to_policy(iam.PolicyStatement(
+            actions=["bedrock-agentcore:GetMemory"],
+            resources=[memory.attr_memory_arn],
+        ))
+
+        # CloudWatch Logs
+        runtime_role.add_to_policy(iam.PolicyStatement(
+            actions=["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+            resources=["*"],
+        ))
+
+        # S3: leer el asset de código subido por CDK
+        runtime_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:ListBucket"],
+            resources=["arn:aws:s3:::cdk-*"],
+        ))
+
+        # ── AgentCore Runtime — Direct Code Deployment (CodeZip) ──────────────
+        # El Runtime CodeZip NO instala requirements.txt automáticamente —
+        # las dependencias deben incluirse en el zip.
+        # Usamos bundling para hacer `pip install` antes de zipar.
+        # El Runtime rechaza __pycache__ compilados para otra arquitectura,
+        # así que los eliminamos del output.
+        agent_artifact = AgentRuntimeArtifact.from_code_asset(
+            entrypoint=["main.py"],
+            path=os.path.join(os.path.dirname(__file__), "..", "agent"),
+            runtime=AgentCoreRuntime.PYTHON_3_13,
+            bundling=aws_cdk.BundlingOptions(
+                image=aws_cdk.DockerImage.from_registry("python:3.13-slim"),
+                command=[
+                    "bash", "-c",
+                    # 1. Copiar el código fuente al output
+                    "cp -r /asset-input/. /asset-output/ && "
+                    # 2. Instalar dependencias directamente en el output
+                    "pip install -r /asset-output/requirements.txt -t /asset-output --quiet --no-compile && "
+                    # 3. Eliminar __pycache__ y .pyc que el Runtime rechaza
+                    "find /asset-output -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && "
+                    "find /asset-output -name '*.pyc' -delete && "
+                    "find /asset-output -name '*.pyo' -delete"
+                ],
+            ),
+        )
+
+        runtime = Runtime(
+            self, "TravelAgentRuntime",
+            runtime_name="TravelAgentRuntime",
+            description="Travel Agent — Gateway MCP + Memory",
+            execution_role=runtime_role,
+            agent_runtime_artifact=agent_artifact,
+            environment_variables={
+                "TRAVEL_AGENT_GATEWAY_URL": gateway.attr_gateway_url,
+                "TRAVEL_AGENT_MEMORY_ID":   memory.attr_memory_id,
+                "MODEL_ID":                 "us.amazon.nova-lite-v1:0",
+                "AWS_DEFAULT_REGION":       "us-east-1",
+            },
+        )
+
         # ── Outputs ────────────────────────────────────────────────────────────
         # Estos valores los necesitás para configurar el agente después del deploy.
         CfnOutput(
@@ -243,7 +353,15 @@ class AgentCoreStack(Stack):
             export_name="TravelAgentGatewayUrl",
         )
 
+        CfnOutput(
+            self, "TravelAgentRuntimeArn",
+            value=runtime.agent_runtime_arn,
+            description="ARN del Runtime — usalo con test_runtime.py para invocar el agente",
+            export_name="TravelAgentRuntimeArn",
+        )
+
         # Exponemos el memory_id como atributo para otros stacks
         self.memory_id = memory.ref
         self.gateway_id = gateway.ref
         self.gateway_url = gateway.attr_gateway_url
+        self.runtime_arn  = runtime.agent_runtime_arn

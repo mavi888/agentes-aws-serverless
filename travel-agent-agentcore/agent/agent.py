@@ -1,9 +1,18 @@
 """
-Agente asistente de viajes con AgentCore Memory.
+Travel Agent con AgentCore Memory + Gateway.
 
-Estrategias de memoria integradas:
+El agente se conecta al Gateway usando MCPClient con streamablehttp_client + SigV4.
+El Gateway expone las herramientas de los dos targets como un único endpoint MCP:
+  - get_trip_summary  → Target Lambda
+  - search_flights    → Target MCP (aerolínea)
+  - book_flight       → Target MCP (aerolínea)
+
+Estrategias de memoria:
   - SEMANTIC:         Hechos del usuario (destinos, historial, contexto)
   - USER_PREFERENCE:  Preferencias explícitas (aerolínea, asiento, clase, hotel)
+
+Los Strategy IDs se resuelven dinámicamente al primer uso llamando a
+list_memory_strategies() — no se necesitan como variables de entorno.
 """
 
 import os
@@ -42,17 +51,48 @@ REGION     = os.environ.get("AWS_REGION", "us-east-1")
 # Localmente se puede pasar por variable de entorno o hardcodearlo tras el deploy.
 MEMORY_ID  = os.environ.get("TRAVEL_AGENT_MEMORY_ID", "")  # ← completar tras cdk deploy
 
-# Strategy IDs: se generan al crear el Memory resource.
-# Se obtienen llamando a list_memory_strategies(memoryId=MEMORY_ID) o desde la consola.
-SEMANTIC_STRATEGY_ID         = os.environ.get("SEMANTIC_STRATEGY_ID",         "")
-USER_PREFERENCE_STRATEGY_ID  = os.environ.get("USER_PREFERENCE_STRATEGY_ID",  "")
-
 # ── SESSION_ID: identifica la conversación actual ─────────────────────────────
 # Se genera una vez por proceso. El ACTOR_ID lo provee el caller (run_local, Lambda, etc.)
 SESSION_ID = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 # Gateway URL — output del AgentCoreStack después del deploy
 GATEWAY_URL = os.environ.get("TRAVEL_AGENT_GATEWAY_URL", "")
+
+
+# ── Resolución dinámica de Strategy IDs ───────────────────────────────────────
+# Los Strategy IDs los asigna AgentCore al crear la memoria — no son
+# determinísticos y no están disponibles como outputs de CDK en síntesis.
+# Los resolvemos una sola vez por proceso via get_memory() y los cacheamos.
+_strategy_ids: dict = {}  # {"SEMANTIC": "...", "USER_PREFERENCE": "..."}
+
+
+def _resolve_strategy_ids() -> dict:
+    """Llama a get_memory() via boto3 control plane y cachea los IDs por tipo.
+
+    Retorna un dict con claves "SEMANTIC" y "USER_PREFERENCE".
+    Si falla o no encuentra las estrategias, retorna un dict vacío.
+    """
+    global _strategy_ids
+    if _strategy_ids:
+        return _strategy_ids
+
+    if not MEMORY_ID:
+        return _strategy_ids
+
+    try:
+        control = boto3.client("bedrock-agentcore-control", region_name=REGION)
+        resp = control.get_memory(memoryId=MEMORY_ID)
+        strategies = resp.get("memory", {}).get("strategies", [])
+        for s in strategies:
+            stype = s.get("type", "")
+            sid   = s.get("strategyId", "")
+            if sid:
+                _strategy_ids[stype] = sid
+        logger.info("✅ Strategy IDs resueltos: %s", _strategy_ids)
+    except Exception as e:
+        logger.warning("⚠️  No se pudieron resolver los Strategy IDs: %s", e)
+
+    return _strategy_ids
 
 
 # ── System Prompt ──────────────────────────────────────────────────────────────
@@ -128,7 +168,8 @@ class LoggingPlugin(Plugin):
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def _memory_configured() -> bool:
     """Retorna True si el Memory ID y los Strategy IDs están configurados."""
-    return bool(MEMORY_ID and SEMANTIC_STRATEGY_ID and USER_PREFERENCE_STRATEGY_ID)
+    ids = _resolve_strategy_ids()
+    return bool(MEMORY_ID and ids.get("SEMANTIC") and ids.get("USER_PREFERENCE"))
 
 
 def _gateway_configured() -> bool:
@@ -146,8 +187,12 @@ def get_existing_memory(memory_client: MemoryClient, actor_id: str) -> str:
       pueden acumularse (destinos, conversaciones pasadas) y la búsqueda semántica
       filtra los más relevantes sin cortar arbitrariamente por posición.
     """
-    semantic_namespace        = f"/strategies/{SEMANTIC_STRATEGY_ID}/actors/{actor_id}"
-    user_preference_namespace = f"/strategies/{USER_PREFERENCE_STRATEGY_ID}/actors/{actor_id}"
+    strategy_ids = _resolve_strategy_ids()
+    semantic_id         = strategy_ids.get("SEMANTIC", "")
+    user_preference_id  = strategy_ids.get("USER_PREFERENCE", "")
+
+    semantic_namespace        = f"/strategies/{semantic_id}/actors/{actor_id}"
+    user_preference_namespace = f"/strategies/{user_preference_id}/actors/{actor_id}"
     lines = []
 
     # User Preference → list: queremos TODAS las preferencias sin filtro
@@ -212,9 +257,10 @@ def create_agent(actor_id: str, session_id: str = None):
 
     if _memory_configured():
         memory_client = MemoryClient(region_name=REGION)
+        strategy_ids = _resolve_strategy_ids()
 
         # Namespace semántico para el tool provider y session manager
-        semantic_namespace = f"/strategies/{SEMANTIC_STRATEGY_ID}/actors/{actor_id}"
+        semantic_namespace = f"/strategies/{strategy_ids['SEMANTIC']}/actors/{actor_id}"
 
         # 1. Recuperar contexto previo para inyectar al system prompt
         memory_context = get_existing_memory(memory_client, actor_id)
